@@ -63,16 +63,16 @@ class DocumentController extends Controller
         $fileName = uniqid() . '_' . $file->getClientOriginalName();
         $containerName = config('filesystems.disks.azure.container');
 
-        try {
-            // Subir el archivo a Azure Blob Storage
-            $content = fopen($file->getPathname(), 'r');
-            $options = new CreateBlockBlobOptions();
-            $options->setContentType($file->getMimeType());
-            
-            $this->blobClient->createBlockBlob($containerName, $fileName, $content, $options);
-            
+        try {            
             $document = Document::where('title', $request->title)->where('user_id', auth()->id())->first();
             if (!$document) {
+                // Subir el archivo a Azure Blob Storage
+                $content = fopen($file->getPathname(), 'r');
+                $options = new CreateBlockBlobOptions();
+                $options->setContentType($file->getMimeType());
+                
+                $this->blobClient->createBlockBlob($containerName, $fileName, $content, $options);
+
                 $document = Document::create([
                     'user_id' => auth()->id(),
                     'title' => $request->title,

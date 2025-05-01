@@ -209,20 +209,138 @@ class ProcessDocument implements ShouldQueue
         // El audio se generará en el frontend usando la API de síntesis de voz del navegador
     }
 
+    public function processPartialJson($content) 
+    {
+        $validCards = [];
+        $invalidCards = [];
+        
+        // Expresión regular mejorada para identificar estructuras de tarjetas
+        // Esta versión es más tolerante con espacios en blanco y permite comillas escapadas dentro de strings
+        $pattern = '/{                             
+        \s*"question"\s*:\s*" ( (?:[^"\\\\]|\\\\.)* ) "\s*,
+        \s*"option1"\s*:\s*" ( (?:[^"\\\\]|\\\\.)* ) "\s*,
+        \s*"option2"\s*:\s*" ( (?:[^"\\\\]|\\\\.)* ) "\s*,
+        \s*"option3"\s*:\s*" ( (?:[^"\\\\]|\\\\.)* ) "\s*,
+        \s*"option4"\s*:\s*" ( (?:[^"\\\\]|\\\\.)* ) "\s*,
+        \s*"explanation"\s*:\s*" ( (?:[^"\\\\]|\\\\.)* ) "\s*,
+        \s*"answer"\s*:\s* ( \d+ ) \s*
+        }/xs';  
+        
+        if (preg_match_all($pattern, $content, $matches, PREG_SET_ORDER)) {
+            foreach ($matches as $index => $match) {
+                try {
+                    // Reconstruir la tarjeta manualmente para evitar problemas con JSON mal formado
+                    $card = [
+                        'question' => stripcslashes($match[1]),
+                        'option1' => stripcslashes($match[2]),
+                        'option2' => stripcslashes($match[3]),
+                        'option3' => stripcslashes($match[4]),
+                        'option4' => stripcslashes($match[5]),
+                        'explanation' => stripcslashes($match[6]),
+                        'answer' => (int)$match[7]
+                    ];
+                    
+                    // Validaciones adicionales
+                    if ($card['answer'] < 1 || $card['answer'] > 4) {
+                        throw new \Exception("Respuesta fuera de rango: {$card['answer']}");
+                    }
+                    
+                    if (empty($card['question']) || empty($card['option1'])) {
+                        throw new \Exception("Campos obligatorios vacíos");
+                    }
+                    
+                    $validCards[] = $card;
+                    Log::info("Tarjeta #{$index} procesada correctamente");
+                } catch (\Exception $e) {
+                    $invalidCards[] = [
+                        'raw' => $match[0],
+                        'error' => $e->getMessage()
+                    ];
+                    Log::error("Error al procesar tarjeta #{$index}: " . $e->getMessage());
+                }
+            }
+        }
+        
+        // Registrar estadísticas del procesamiento
+        $totalFound = count($validCards) + count($invalidCards);
+        Log::info("Procesamiento completado: {$totalFound} tarjetas encontradas, " . 
+                count($validCards) . " válidas, " . 
+                count($invalidCards) . " inválidas");
+        
+        return [
+            'cards' => $validCards,
+            'stats' => [
+                'total_found' => $totalFound,
+                'valid' => count($validCards),
+                'invalid' => count($invalidCards)
+            ],
+            'invalid_cards' => $invalidCards
+        ];
+    }
+
     protected function parseResponse($response)
     {
         $content = $response['candidates'][0]['content']['parts'][0]['text'];
-        
+
+        // Limpiar el contenido
         $content = preg_replace('/[\x00-\x1F\x7F]/u', '', $content);
         $content = str_replace('```json', '', $content);
         $content = str_replace('```', '', $content);
+        $content = trim($content);
 
         try {
-            $data = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+            // Intentar corregir el JSON
+            $data = $this->processPartialJson($content);
+
+            if (!isset($data['cards']) || !is_array($data['cards'])) {
+                Log::error('Formato de respuesta inválido: no se encontró la clave "cards" o no es un array');
+                return [];
+            }
             return $data['cards'];
         } catch (\JsonException $e) {
-            Log::error('Error parsing AI response: ' . $content);
-            throw new \Exception('Invalid response format from AI');
+            Log::error('Error parsing AI response: ' . $e->getMessage());
+            Log::error('Contenido recibido: ' . $content);
+            return [];
         }
+    }
+
+    private function fixJson($content)
+    {
+        // Buscar el inicio del JSON
+        $start = strpos($content, '{');
+        if ($start === false) {
+            return '{"cards":[]}';
+        }
+
+        // Buscar el final del JSON
+        $end = strrpos($content, '}');
+        if ($end === false) {
+            return '{"cards":[]}';
+        }
+
+        // Extraer el JSON
+        $json = substr($content, $start, $end - $start + 1);
+
+        // Asegurar que tenga la estructura básica
+        if (!str_contains($json, '"cards"')) {
+            $json = '{"cards":' . $json . '}';
+        }
+
+        // Corregir comillas simples por dobles
+        $json = preg_replace('/\'([^\']+)\':/', '"$1":', $json);
+        $json = preg_replace('/:\s*\'([^\']+)\'/', ':"$1"', $json);
+
+        // Corregir comas faltantes
+        $json = preg_replace('/([}\]"])\s*([{["])/', '$1,$2', $json);
+
+        // Corregir comas extras
+        $json = preg_replace('/,\s*([}\]])/', '$1', $json);
+
+        // Asegurar que el array de cards esté bien formado
+        if (!str_contains($json, '"cards":[')) {
+            $json = str_replace('"cards":', '"cards":[', $json) . ']';
+        }
+
+        return $json;
     }
 }
